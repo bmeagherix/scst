@@ -1299,11 +1299,13 @@ static int __scst_process_luns_mgmt_store(char *buffer,
 	unsigned long virt_lun;
 	struct scst_acg_dev *acg_dev = NULL, *acg_dev_tmp;
 	struct scst_device *d, *dev = NULL;
+	struct scst_session *s, *sess = NULL;
 	enum {
 		SCST_LUN_ACTION_ADD	= 1,
 		SCST_LUN_ACTION_DEL	= 2,
 		SCST_LUN_ACTION_REPLACE	= 3,
 		SCST_LUN_ACTION_CLEAR	= 4,
+		SCST_LUN_ACTION_SESSION_CHANGE_PATH	= 5,
 	};
 	bool replace_gen_ua = true;
 
@@ -1325,6 +1327,8 @@ static int __scst_process_luns_mgmt_store(char *buffer,
 		replace_gen_ua = false;
 	} else if (strcasecmp("clear", p) == 0) {
 		action = SCST_LUN_ACTION_CLEAR;
+	} else if (strcasecmp("change_path", p) == 0) {
+		action = SCST_LUN_ACTION_SESSION_CHANGE_PATH;
 	} else {
 		PRINT_ERROR("Unknown action \"%s\"", p);
 		res = -EINVAL;
@@ -1338,6 +1342,23 @@ static int __scst_process_luns_mgmt_store(char *buffer,
 	/* Check if tgt and acg not already freed while we were coming here */
 	if (scst_check_tgt_acg_ptrs(tgt, acg) != 0)
 		goto out_unlock;
+
+	if (action == SCST_LUN_ACTION_SESSION_CHANGE_PATH) {
+		p = scst_get_next_lexem(&pp);
+
+		list_for_each_entry(s, &tgt->sess_list, sess_list_entry) {
+			if (!strcmp(s->sess_name, p)) {
+				sess = s;
+				TRACE_DBG("Session %p (%s) found", sess, p);
+				break;
+			}
+		}
+		if (sess == NULL) {
+			PRINT_ERROR("Session '%s' not found", p);
+			res = -EINVAL;
+			goto out_unlock;
+		}
+	}
 
 	if ((action != SCST_LUN_ACTION_CLEAR) &&
 	    (action != SCST_LUN_ACTION_DEL)) {
@@ -1404,6 +1425,19 @@ static int __scst_process_luns_mgmt_store(char *buffer,
 		res = scst_acg_repl_lun(acg, tgt_kobj ? tgt->tgt_luns_kobj :
 					acg->luns_kobj, dev, virt_lun,
 					flags);
+		if (res != 0)
+			goto out_unlock;
+		break;
+	}
+	case SCST_LUN_ACTION_SESSION_CHANGE_PATH:
+	{
+		res = scst_parse_add_repl_param(acg, dev, pp, &virt_lun,
+						&read_only);
+		if (res != 0)
+			goto out_unlock;
+
+		res = scst_sess_repl_lun(sess, acg, tgt_kobj ? tgt->tgt_luns_kobj :
+					 acg->luns_kobj, dev, virt_lun, 0);
 		if (res != 0)
 			goto out_unlock;
 		break;
@@ -1519,6 +1553,7 @@ static ssize_t scst_luns_mgmt_show(struct kobject *kobj,
 		"       echo \"replace_no_ua H:C:I:L lun [parameters]\" >mgmt\n"
 		"       echo \"replace_no_ua VNAME lun [parameters]\" >mgmt\n"
 		"       echo \"clear\" >mgmt\n"
+		"       echo \"change_path sessionname H:C:I:L lun [parameters]\" >mgmt\n"
 		"\n"
 		"where parameters are one or more "
 		"param_name=value pairs separated by ';'\n"

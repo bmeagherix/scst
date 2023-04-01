@@ -369,6 +369,9 @@ int scst_sess_alloc_tgt_devs(struct scst_session *sess);
 void scst_sess_free_tgt_devs(struct scst_session *sess);
 struct scst_tgt_dev *scst_lookup_tgt_dev(struct scst_session *sess, u64 lun);
 void scst_nexus_loss(struct scst_tgt_dev *tgt_dev, bool queue_UA);
+int scst_sess_repl_lun(struct scst_session *sess, struct scst_acg *acg,
+		       struct kobject *parent, struct scst_device *dev,
+		       uint64_t lun, unsigned int flags);
 
 #define SCST_ADD_LUN_READ_ONLY	1
 #define SCST_ADD_LUN_GEN_UA	2

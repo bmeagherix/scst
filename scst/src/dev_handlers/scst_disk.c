@@ -39,8 +39,15 @@
 
 # define DISK_NAME           "dev_disk"
 # define DISK_PERF_NAME      "dev_disk_perf"
+# define DISK_ISCSI_NAME     "dev_disk_iscsi"
 
 #define DISK_DEF_BLOCK_SHIFT	9
+
+struct disk_iscsi_data {
+	char *orig_virt_name;
+	unsigned disk_duplicated:1;
+	unsigned ready:1;
+};
 
 static int disk_attach(struct scst_device *dev)
 {
@@ -568,6 +575,151 @@ out_complete:
 	goto out;
 }
 
+static enum scst_exec_res disk_iscsi_exec(struct scst_cmd *cmd)
+{
+	struct scst_tgt_dev *tgt_dev = cmd->tgt_dev;
+
+	if (tgt_dev->dh_priv) {
+		struct disk_iscsi_data *data = (struct disk_iscsi_data *)tgt_dev->dh_priv;
+
+		if (unlikely(!data->ready)) {
+			if (!strcmp(cmd->dev->virt_name, data->orig_virt_name)) {
+				/* virt_name matches orig_virt_name, so BUSY */
+				cmd->status = SAM_STAT_BUSY;
+				cmd->msg_status = 0;
+				cmd->host_status = DID_OK;
+				cmd->driver_status = 0;
+
+				cmd->completed = 1;
+				cmd->scst_cmd_done(cmd, SCST_CMD_STATE_DEFAULT, SCST_CONTEXT_SAME);
+
+				return SCST_EXEC_COMPLETED;
+			}
+			/* virt_name does NOT match orig_virt_name, so ready */
+			data->ready = 1;
+		}
+	} else {
+		/*
+		 * The regular "base" disk will not have dh_priv, and we want it
+		 * to be able to complete commands during its initiatization.
+		 */
+	}
+
+	return disk_exec(cmd);
+}
+
+static int disk_iscsi_attach_duplicate_session(struct scst_tgt_dev *tgt_dev)
+{
+	/*
+	 * In order to setup a new open-iscsi session we are obligated to run
+	 * some code in user-space (as that's where the LOGIN, etc is handled).
+	 *
+	 * We also want to be able to perform actions for multiple scst_device
+	 * in parallel.  Therefore, we will launch a usermode helper to
+	 * duplicate the existing session, ultimately invoking iscsiadm to
+	 * initiate the sessions.
+	 *
+	 * Because of shortcomings in the response handling of iscsiadm wrt the
+	 * new SID, we will serialize calls for an individual scst_device.
+	 */
+	char *argv[8] = {
+		"/usr/local/bin/scst/scst-disk-session",
+		"-d", tgt_dev->dev->virt_name,
+		"-i", (char *)tgt_dev->sess->initiator_name,
+		"-n", (char *)tgt_dev->sess->sess_name,
+		NULL };
+	static char *envp[4] = {
+		"HOME=/",
+		"TERM=linux",
+		"PATH=/sbin:/bin:/usr/sbin:/usr/bin", NULL };
+	int err = -ENOMEM;
+
+	TRACE_ENTRY();
+
+	err = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
+	if (err)
+		PRINT_ERROR("call_usermodehelper() failed: %d", err);
+
+	TRACE_EXIT_RES(err);
+	return err;
+}
+
+static int disk_iscsi_deattach_duplicate_session(struct scst_tgt_dev *tgt_dev)
+{
+	char *argv[4] = {
+		"/usr/local/bin/scst/scst-disk-session",
+		"-s", tgt_dev->dev->virt_name,
+		NULL };
+	static char *envp[4] = {
+		"HOME=/",
+		"TERM=linux",
+		"PATH=/sbin:/bin:/usr/sbin:/usr/bin", NULL };
+	int err = -ENOMEM;
+
+	TRACE_ENTRY();
+
+	err = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
+	if (err)
+		PRINT_ERROR("call_usermodehelper() failed: %d", err);
+
+	TRACE_EXIT_RES(err);
+	return err;
+}
+
+static int disk_iscsi_attach_tgt(struct scst_tgt_dev *tgt_dev)
+{
+	int res = 0;
+
+	TRACE_ENTRY();
+
+	if (tgt_dev &&
+	    tgt_dev->sess &&
+	    tgt_dev->sess->initiator_name &&
+	    strcmp(tgt_dev->sess->initiator_name, "copy_manager_sess")) {
+		struct disk_iscsi_data *data;
+
+		data = kzalloc(sizeof(struct disk_iscsi_data), GFP_KERNEL);
+		if (data == NULL) {
+			PRINT_ERROR("Unable to allocate tgt_dev dh_priv (size %zu)",
+				    sizeof(struct disk_iscsi_data));
+			res = -ENOMEM;
+			goto out;
+		}
+		data->orig_virt_name = kstrdup(tgt_dev->dev->virt_name, GFP_KERNEL);
+		if (data->orig_virt_name == NULL) {
+			PRINT_ERROR("Unable to allocate tgt_dev dh_priv orig_virt_name");
+			kfree(data);
+			res = -ENOMEM;
+			goto out;
+		}
+		tgt_dev->dh_priv = data;
+		res = disk_iscsi_attach_duplicate_session(tgt_dev);
+		if (!res)
+			data->disk_duplicated = 1;
+	}
+
+out:
+	TRACE_EXIT_RES(res);
+	return res;
+}
+
+static void disk_iscsi_detach_tgt(struct scst_tgt_dev *tgt_dev)
+{
+	TRACE_ENTRY();
+
+	if (tgt_dev->dh_priv) {
+		struct disk_iscsi_data *data = (struct disk_iscsi_data *)tgt_dev->dh_priv;
+
+		if (data->disk_duplicated)
+			disk_iscsi_deattach_duplicate_session(tgt_dev);
+
+		kfree(data->orig_virt_name);
+		kfree(tgt_dev->dh_priv);
+	}
+
+	TRACE_EXIT();
+}
+
 static ssize_t disk_sysfs_cluster_mode_show(struct kobject *kobj,
 	struct kobj_attribute *attr, char *buf)
 {
@@ -717,6 +869,27 @@ static struct scst_dev_type disk_devtype_perf = {
 #endif
 };
 
+static struct scst_dev_type disk_devtype_iscsi = {
+	.name =			DISK_ISCSI_NAME,
+	.type =			TYPE_DISK,
+	.threads_num =		1,
+	.parse_atomic =		1,
+	.dev_done_atomic =	1,
+	.attach =		disk_attach,
+	.detach =		disk_detach,
+	.attach_tgt =		disk_iscsi_attach_tgt,
+	.detach_tgt =		disk_iscsi_detach_tgt,
+	.parse =		disk_parse,
+	.exec =			disk_iscsi_exec,
+	.on_sg_tablesize_low = disk_on_sg_tablesize_low,
+	.dev_done =		disk_done,
+	.dev_attrs =		disk_attrs,
+#if defined(CONFIG_SCST_DEBUG) || defined(CONFIG_SCST_TRACING)
+	.default_trace_flags = SCST_DEFAULT_DEV_LOG_FLAGS,
+	.trace_flags = &trace_flag,
+#endif
+};
+
 static int __init init_scst_disk_driver(void)
 {
 	int res = 0;
@@ -735,11 +908,19 @@ static int __init init_scst_disk_driver(void)
 	if (res < 0)
 		goto out_unreg;
 
+	disk_devtype_iscsi.module = THIS_MODULE;
+
+	res = scst_register_dev_driver(&disk_devtype_iscsi);
+	if (res < 0)
+		goto out_unreg2;
 
 out:
 	TRACE_EXIT_RES(res);
 	return res;
 
+
+out_unreg2:
+	scst_unregister_dev_driver(&disk_devtype_perf);
 
 out_unreg:
 	scst_unregister_dev_driver(&disk_devtype);
@@ -750,6 +931,7 @@ static void __exit exit_scst_disk_driver(void)
 {
 	TRACE_ENTRY();
 
+	scst_unregister_dev_driver(&disk_devtype_iscsi);
 	scst_unregister_dev_driver(&disk_devtype_perf);
 	scst_unregister_dev_driver(&disk_devtype);
 

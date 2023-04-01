@@ -5487,6 +5487,70 @@ void scst_nexus_loss(struct scst_tgt_dev *tgt_dev, bool queue_UA)
 	return;
 }
 
+int scst_sess_repl_lun(struct scst_session *sess, struct scst_acg *acg,
+	struct kobject *parent, struct scst_device *dev,
+	uint64_t lun, unsigned int flags)
+{
+	int i, clm;
+	struct list_head *head;
+	struct scst_tgt_dev *t, *tgt_dev = NULL;
+	struct scst_device *olddev;
+	int res = -EINVAL;
+
+	mutex_lock(&sess->tgt_dev_list_mutex);
+	for (i = 0; i < SESS_TGT_DEV_LIST_HASH_SIZE; i++) {
+		head = &sess->sess_tgt_dev_list[i];
+		list_for_each_entry_rcu(t, head, sess_tgt_dev_list_entry) {
+			if (t->lun == lun) {
+				tgt_dev = t;
+				break;
+			}
+		}
+	}
+	mutex_unlock(&sess->tgt_dev_list_mutex);
+
+	if (!tgt_dev) {
+		PRINT_ERROR("Did not find tgt_dev\n");
+		goto out;
+	}
+
+	olddev = tgt_dev->dev;
+	clm = olddev->cluster_mode;
+
+	/* From scst_free_tgt_dev */
+	scst_tgt_dev_stop_threads(tgt_dev);
+	percpu_ref_put(&olddev->refcnt);
+
+	/* From scst_del_tgt_dev */
+	spin_lock_bh(&olddev->dev_lock);
+	list_del(&tgt_dev->dev_tgt_dev_list_entry);
+	spin_unlock_bh(&olddev->dev_lock);
+
+	/* Switch */
+	tgt_dev->dev = dev;
+
+	/* From scst_alloc_add_tgt_dev */
+	spin_lock_bh(&dev->dev_lock);
+	list_add_tail(&tgt_dev->dev_tgt_dev_list_entry, &dev->dev_tgt_dev_list);
+	spin_unlock_bh(&dev->dev_lock);
+
+	scst_tgt_dev_setup_threads(tgt_dev);
+	percpu_ref_get(&dev->refcnt);
+
+	if (dev->cluster_mode != clm) {
+		res = scst_pr_set_cluster_mode(dev, clm, dev->dh_priv);
+		if (res)
+			goto out;
+		dev->cluster_mode = clm;
+	}
+
+	res = 0;
+
+out:
+	return res;
+}
+
+
 static void scst_del_tgt_dev(struct scst_tgt_dev *tgt_dev)
 {
 	struct scst_device *dev = tgt_dev->dev;

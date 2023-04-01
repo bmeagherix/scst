@@ -21,17 +21,20 @@ SHELL=/bin/bash
 
 FILEIO_DIR=fileio
 STPGD_DIR=stpgd
+DISK_ISCSI_DIR=disk_iscsi
 EVENTS_DIR=events
 
 all:
 	cd $(FILEIO_DIR) && $(MAKE) $@
 	cd $(STPGD_DIR) && $(MAKE) $@
 #	cd $(EVENTS_DIR) && $(MAKE) $@
+	cd $(DISK_ISCSI_DIR) && $(MAKE) $@
 
 install:
 	cd $(FILEIO_DIR) && $(MAKE) $@
 	cd $(STPGD_DIR) && $(MAKE) $@
 #	cd $(EVENTS_DIR) && $(MAKE) $@
+	cd $(DISK_ISCSI_DIR) && $(MAKE) $@
 
 uninstall:
 	cd $(FILEIO_DIR) && $(MAKE) $@
@@ -42,26 +45,31 @@ clean:
 	cd $(FILEIO_DIR) && $(MAKE) $@
 	cd $(STPGD_DIR) && $(MAKE) $@
 	cd $(EVENTS_DIR) && $(MAKE) $@
+	cd $(DISK_ISCSI_DIR) && $(MAKE) $@
 
 extraclean:
 	cd $(FILEIO_DIR) && $(MAKE) $@
 	cd $(STPGD_DIR) && $(MAKE) $@
 	cd $(EVENTS_DIR) && $(MAKE) $@
+	cd $(DISK_ISCSI_DIR) && $(MAKE) $@
 
 2release:
 	cd $(FILEIO_DIR) && $(MAKE) $@
 	cd $(STPGD_DIR) && $(MAKE) $@
 	cd $(EVENTS_DIR) && $(MAKE) $@
+	cd $(DISK_ISCSI_DIR) && $(MAKE) $@
 
 2debug:
 	cd $(FILEIO_DIR) && $(MAKE) $@
 	cd $(STPGD_DIR) && $(MAKE) $@
 	cd $(EVENTS_DIR) && $(MAKE) $@
+	cd $(DISK_ISCSI_DIR) && $(MAKE) $@
 
 2perf:
 	cd $(FILEIO_DIR) && $(MAKE) $@
 	cd $(STPGD_DIR) && $(MAKE) $@
 	cd $(EVENTS_DIR) && $(MAKE) $@
+	cd $(DISK_ISCSI_DIR) && $(MAKE) $@
 
 help:
 	@echo "		all (the default) : make all"
